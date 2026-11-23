@@ -1,0 +1,366 @@
+<?xml version="1.0" encoding="utf-8"?>
+<roblox version="4">
+  <External>null</External>
+  <External>nil</External>
+  <Item class="DataModel" referent="RBX0">
+    <Properties>
+      <string name="Name">Game</string>
+    </Properties>
+    <Item class="Workspace" referent="RBX1"><Properties><string name="Name">Workspace</string></Properties></Item>
+    <Item class="Teams" referent="RBX2"><Properties><string name="Name">Teams</string></Properties></Item>
+    <Item class="ReplicatedStorage" referent="RBX3"><Properties><string name="Name">ReplicatedStorage</string></Properties></Item>
+    <Item class="ServerScriptService" referent="RBX4">
+      <Properties><string name="Name">ServerScriptService</string></Properties>
+      <Item class="Script" referent="RBX65809FAF606E"><Properties><string name="Name"><![CDATA[FootballServer]]></string><ProtectedString name="Source"><![CDATA[
+-- Football 5v5 - Server gameplay
+local Players = game:GetService("Players")
+local Teams = game:GetService("Teams")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local CONFIG = {
+    MatchLength = 300,
+    Intermission = 8,
+    MaxPerTeam = 5,
+    BallRadius = 2.25,
+    KickCooldown = 0.45,
+    KickPower = 92,
+    LiftPower = 18,
+}
+
+local function make(className, name, parent, props)
+    local obj = Instance.new(className)
+    obj.Name = name
+    for k, v in pairs(props or {}) do obj[k] = v end
+    obj.Parent = parent
+    return obj
+end
+
+-- Teams
+local red = Teams:FindFirstChild("Red") or make("Team", "Red", Teams, {
+    TeamColor = BrickColor.new("Really red"), AutoAssignable = false
+})
+local blue = Teams:FindFirstChild("Blue") or make("Team", "Blue", Teams, {
+    TeamColor = BrickColor.new("Really blue"), AutoAssignable = false
+})
+
+-- Network events
+local remotes = ReplicatedStorage:FindFirstChild("FootballRemotes") or make("Folder", "FootballRemotes", ReplicatedStorage)
+local kickEvent = remotes:FindFirstChild("KickBall") or make("RemoteEvent", "KickBall", remotes)
+local sprintEvent = remotes:FindFirstChild("Sprint") or make("RemoteEvent", "Sprint", remotes)
+local stateEvent = remotes:FindFirstChild("MatchState") or make("RemoteEvent", "MatchState", remotes)
+
+-- Build the pitch once
+local old = workspace:FindFirstChild("FootballStadium")
+if old then old:Destroy() end
+local stadium = make("Folder", "FootballStadium", workspace)
+
+local function part(name, size, cf, color, material, parent, anchored, transparency, canCollide)
+    return make("Part", name, parent or stadium, {
+        Size = size, CFrame = cf, Anchored = anchored ~= false,
+        Color = color, Material = material or Enum.Material.SmoothPlastic,
+        TopSurface = Enum.SurfaceType.Smooth, BottomSurface = Enum.SurfaceType.Smooth,
+        Transparency = transparency or 0, CanCollide = canCollide ~= false,
+        CastShadow = true
+    })
+end
+
+local green = Color3.fromRGB(42, 135, 67)
+local white = Color3.fromRGB(245, 245, 235)
+local dark = Color3.fromRGB(35, 39, 45)
+local redColor = Color3.fromRGB(220, 45, 55)
+local blueColor = Color3.fromRGB(45, 105, 225)
+
+part("Pitch", Vector3.new(120, 1, 80), CFrame.new(0, 0, 0), green, Enum.Material.Grass)
+-- Alternating turf strips
+for i = 0, 5 do
+    part("TurfStripe_"..i, Vector3.new(10, 0.08, 80), CFrame.new(-50 + i*20, 0.54, 0), Color3.fromRGB(48 + (i%2)*8, 145 + (i%2)*5, 72), Enum.Material.Grass, stadium, true, 0, false)
+end
+-- Boundary and halfway lines
+part("Touchline_North", Vector3.new(120, 0.12, 0.35), CFrame.new(0, 0.62, -39.5), white, Enum.Material.SmoothPlastic, stadium, true, 0, false)
+part("Touchline_South", Vector3.new(120, 0.12, 0.35), CFrame.new(0, 0.62, 39.5), white, Enum.Material.SmoothPlastic, stadium, true, 0, false)
+part("GoalLine_Left", Vector3.new(0.35, 0.12, 80), CFrame.new(-59.5, 0.62, 0), white, Enum.Material.SmoothPlastic, stadium, true, 0, false)
+part("GoalLine_Right", Vector3.new(0.35, 0.12, 80), CFrame.new(59.5, 0.62, 0), white, Enum.Material.SmoothPlastic, stadium, true, 0, false)
+part("HalfwayLine", Vector3.new(0.25, 0.12, 80), CFrame.new(0, 0.63, 0), white, Enum.Material.SmoothPlastic, stadium, true, 0, false)
+-- Center circle approximation
+for n = 1, 48 do
+    local a1 = (n-1) * math.pi*2/48
+    local a2 = n * math.pi*2/48
+    local x1, z1 = math.cos(a1)*10, math.sin(a1)*10
+    local x2, z2 = math.cos(a2)*10, math.sin(a2)*10
+    local mid = Vector3.new((x1+x2)/2, 0.65, (z1+z2)/2)
+    local d = (Vector3.new(x2,0,z2)-Vector3.new(x1,0,z1)).Magnitude
+    part("CenterCircle", Vector3.new(d,0.1,0.22), CFrame.lookAt(mid, Vector3.new(x2,0.65,z2)), white, Enum.Material.SmoothPlastic, stadium, true, 0, false)
+end
+
+-- Goal frames and invisible scoring volumes at both ends
+local function buildGoal(side, x, color)
+    local z1, z2 = -14, 14
+    part(side.."_PostA", Vector3.new(1, 9, 1), CFrame.new(x, 4.5, z1), white, Enum.Material.Metal)
+    part(side.."_PostB", Vector3.new(1, 9, 1), CFrame.new(x, 4.5, z2), white, Enum.Material.Metal)
+    part(side.."_Crossbar", Vector3.new(1, 1, 28), CFrame.new(x, 9, 0), white, Enum.Material.Metal)
+    part(side.."_BackNet", Vector3.new(0.35, 9, 28), CFrame.new(x + (side=="RedGoal" and -5 or 5), 4.5, 0), color, Enum.Material.ForceField, stadium, true, 0.72, false)
+    local trigger = part(side.."_ScoreTrigger", Vector3.new(7, 8, 26), CFrame.new(x + (side=="RedGoal" and -2.5 or 2.5), 4.2, 0), color, Enum.Material.SmoothPlastic, stadium, true, 1, false)
+    trigger.CanTouch = true
+    return trigger
+end
+local redGoal = buildGoal("RedGoal", -60, redColor)
+local blueGoal = buildGoal("BlueGoal", 60, blueColor)
+
+-- Stadium barriers and stands
+part("NorthBarrier", Vector3.new(124, 8, 2), CFrame.new(0, 4, -42), dark, Enum.Material.Concrete)
+part("SouthBarrier", Vector3.new(124, 8, 2), CFrame.new(0, 4, 42), dark, Enum.Material.Concrete)
+part("WestBarrier", Vector3.new(2, 8, 84), CFrame.new(-62, 4, 0), dark, Enum.Material.Concrete)
+part("EastBarrier", Vector3.new(2, 8, 84), CFrame.new(62, 4, 0), dark, Enum.Material.Concrete)
+for row = 1, 3 do
+    part("NorthStand_"..row, Vector3.new(124, 2, 5), CFrame.new(0, 8 + row*2, -49 - row*4), Color3.fromRGB(75,78,88), Enum.Material.Concrete)
+    part("SouthStand_"..row, Vector3.new(124, 2, 5), CFrame.new(0, 8 + row*2, 49 + row*4), Color3.fromRGB(75,78,88), Enum.Material.Concrete)
+end
+
+-- Team spawn locations
+local function spawn(name, team, pos, color)
+    return make("SpawnLocation", name, stadium, {
+        Size = Vector3.new(6, 1, 6), CFrame = CFrame.new(pos),
+        Anchored = true, Neutral = false, TeamColor = team.TeamColor,
+        AllowTeamChangeOnTouch = false, Duration = 0,
+        Color = color, Material = Enum.Material.Neon
+    })
+end
+for i = 1, 5 do
+    local z = (i-3)*10
+    spawn("RedSpawn"..i, red, Vector3.new(-43, 1, z), redColor)
+    spawn("BlueSpawn"..i, blue, Vector3.new(43, 1, z), blueColor)
+end
+
+-- Ball
+local ball = make("Part", "Football", stadium, {
+    Shape = Enum.PartType.Ball,
+    Size = Vector3.new(CONFIG.BallRadius*2, CONFIG.BallRadius*2, CONFIG.BallRadius*2),
+    CFrame = CFrame.new(0, 4, 0),
+    Anchored = false, CanCollide = true, CanTouch = true,
+    Material = Enum.Material.SmoothPlastic,
+    Color = Color3.fromRGB(245,245,245),
+    CustomPhysicalProperties = PhysicalProperties.new(0.7, 0.35, 0.55, 1, 1)
+})
+ball:SetNetworkOwner(nil)
+local ballStart = CFrame.new(0, 4, 0)
+
+local redScore, blueScore = 0, 0
+local timeLeft = CONFIG.MatchLength
+local matchRunning = true
+local lastKick = {}
+local lastGoal = 0
+local function broadcast()
+    stateEvent:FireAllClients(redScore, blueScore, timeLeft, matchRunning)
+end
+local function resetBall()
+    ball.AssemblyLinearVelocity = Vector3.zero
+    ball.AssemblyAngularVelocity = Vector3.zero
+    ball.CFrame = ballStart
+    ball:SetNetworkOwner(nil)
+end
+local function score(teamName)
+    if not matchRunning or os.clock() - lastGoal < 2.5 then return end
+    lastGoal = os.clock()
+    if teamName == "Red" then redScore += 1 else blueScore += 1 end
+    broadcast()
+    task.wait(2)
+    resetBall()
+end
+redGoal.Touched:Connect(function(hit) if hit == ball then score("Blue") end end)
+blueGoal.Touched:Connect(function(hit) if hit == ball then score("Red") end end)
+
+local function assignTeam(player)
+    local redCount, blueCount = 0, 0
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= player then
+            if p.Team == red then redCount += 1 elseif p.Team == blue then blueCount += 1 end
+        end
+    end
+    if redCount < CONFIG.MaxPerTeam and (redCount <= blueCount or blueCount >= CONFIG.MaxPerTeam) then
+        player.Team = red
+    elseif blueCount < CONFIG.MaxPerTeam then
+        player.Team = blue
+    else
+        player.Team = nil
+    end
+end
+
+Players.PlayerAdded:Connect(function(player)
+    assignTeam(player)
+    local stats = make("Folder", "leaderstats", player)
+    make("IntValue", "Goals", stats, {Value = 0})
+    player.CharacterAdded:Connect(function(character)
+        local humanoid = character:WaitForChild("Humanoid", 10)
+        if humanoid then
+            humanoid.WalkSpeed = 16
+            humanoid.JumpPower = 50
+        end
+    end)
+end)
+
+Players.PlayerRemoving:Connect(function(player) lastKick[player] = nil end)
+
+kickEvent.OnServerEvent:Connect(function(player, direction)
+    if not matchRunning or typeof(direction) ~= "Vector3" or direction.Magnitude < 0.1 then return end
+    local now = os.clock()
+    if lastKick[player] and now - lastKick[player] < CONFIG.KickCooldown then return end
+    local character = player.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not root or not humanoid or humanoid.Health <= 0 then return end
+    local offset = ball.Position - root.Position
+    if offset.Magnitude > 12 then return end
+    lastKick[player] = now
+    local flat = Vector3.new(direction.X, 0, direction.Z)
+    if flat.Magnitude < 0.1 then flat = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z) end
+    flat = flat.Unit
+    ball:SetNetworkOwner(nil)
+    ball:ApplyImpulse((flat * CONFIG.KickPower + Vector3.new(0, CONFIG.LiftPower, 0)) * ball.AssemblyMass)
+    local stats = player:FindFirstChild("leaderstats")
+    if stats and stats:FindFirstChild("Goals") then
+        -- Goal count is awarded by the scorer proximity when a goal is made; score remains authoritative.
+    end
+end)
+
+sprintEvent.OnServerEvent:Connect(function(player, enabled)
+    if typeof(enabled) ~= "boolean" then return end
+    local character = player.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if humanoid then humanoid.WalkSpeed = enabled and 23 or 16 end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if matchRunning then
+            timeLeft -= 1
+            if timeLeft <= 0 then
+                timeLeft = 0
+                matchRunning = false
+                broadcast()
+                task.wait(CONFIG.Intermission)
+                redScore, blueScore = 0, 0
+                timeLeft = CONFIG.MatchLength
+                matchRunning = true
+                resetBall()
+            end
+            broadcast()
+        end
+    end
+end)
+
+broadcast()
+]]></ProtectedString></Properties></Item>
+    </Item>
+    <Item class="StarterPlayer" referent="RBX5">
+      <Properties><string name="Name">StarterPlayer</string></Properties>
+      <Item class="StarterPlayerScripts" referent="RBX6">
+        <Properties><string name="Name">StarterPlayerScripts</string></Properties>
+        <Item class="LocalScript" referent="RBXA8254717B002"><Properties><string name="Name"><![CDATA[FootballClient]]></string><ProtectedString name="Source"><![CDATA[
+-- Football 5v5 - Client camera, HUD, and controls
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ContextActionService = game:GetService("ContextActionService")
+local UserInputService = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+local remotes = ReplicatedStorage:WaitForChild("FootballRemotes")
+local kickEvent = remotes:WaitForChild("KickBall")
+local sprintEvent = remotes:WaitForChild("Sprint")
+local stateEvent = remotes:WaitForChild("MatchState")
+
+-- Third-person camera behind the player
+local function setupCharacter(character)
+    local humanoid = character:WaitForChild("Humanoid")
+    player.CameraMode = Enum.CameraMode.Classic
+    player.CameraMinZoomDistance = 10
+    player.CameraMaxZoomDistance = 18
+    workspace.CurrentCamera.CameraType = Enum.CameraType.Custom
+    workspace.CurrentCamera.CameraSubject = humanoid
+    humanoid.CameraOffset = Vector3.new(0, 1.5, 0)
+end
+if player.Character then setupCharacter(player.Character) end
+player.CharacterAdded:Connect(setupCharacter)
+
+-- Scoreboard HUD
+local gui = Instance.new("ScreenGui")
+gui.Name = "FootballHUD"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.Parent = player:WaitForChild("PlayerGui")
+
+local panel = Instance.new("Frame")
+panel.Name = "ScorePanel"
+panel.AnchorPoint = Vector2.new(0.5, 0)
+panel.Position = UDim2.new(0.5, 0, 0, 14)
+panel.Size = UDim2.fromOffset(300, 58)
+panel.BackgroundColor3 = Color3.fromRGB(20, 24, 31)
+panel.BackgroundTransparency = 0.12
+panel.BorderSizePixel = 0
+panel.Parent = gui
+local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0, 12); corner.Parent = panel
+
+local function label(name, text, pos, size, color)
+    local l = Instance.new("TextLabel")
+    l.Name = name
+    l.BackgroundTransparency = 1
+    l.Position = pos
+    l.Size = size
+    l.Font = Enum.Font.GothamBold
+    l.Text = text
+    l.TextColor3 = color
+    l.TextScaled = true
+    l.Parent = panel
+    return l
+end
+local redLabel = label("RedScore", "الأحمر 0", UDim2.new(0,8,0,5), UDim2.new(0,105,0,28), Color3.fromRGB(255,95,95))
+local blueLabel = label("BlueScore", "0 الأزرق", UDim2.new(1,-113,0,5), UDim2.new(0,105,0,28), Color3.fromRGB(105,155,255))
+local timerLabel = label("Timer", "05:00", UDim2.new(0.35,0,0,32), UDim2.new(0.3,0,0,20), Color3.fromRGB(255,255,255))
+
+local function formatTime(seconds)
+    return string.format("%02d:%02d", math.floor(seconds/60), seconds%60)
+end
+stateEvent.OnClientEvent:Connect(function(red, blue, seconds, running)
+    redLabel.Text = "الأحمر "..tostring(red)
+    blueLabel.Text = tostring(blue).." الأزرق"
+    timerLabel.Text = running and formatTime(seconds) or "انتهت المباراة"
+end)
+
+-- Controls: E / left click / touch kick button
+local function kickAction(_, inputState)
+    if inputState == Enum.UserInputState.Begin then
+        local camera = workspace.CurrentCamera
+        local direction = camera and camera.CFrame.LookVector or Vector3.new(1,0,0)
+        kickEvent:FireServer(direction)
+    end
+    return Enum.ContextActionResult.Sink
+end
+ContextActionService:BindAction("KickBallAction", kickAction, true, Enum.KeyCode.E, Enum.UserInputType.MouseButton1)
+ContextActionService:SetTitle("KickBallAction", "تسديد")
+ContextActionService:SetPosition("KickBallAction", UDim2.new(0.78, 0, 0.68, 0))
+
+-- Sprint: Shift on keyboard; a touch button is created for mobile
+local sprinting = false
+local function sprintAction(_, inputState)
+    if inputState == Enum.UserInputState.Begin and not sprinting then
+        sprinting = true
+        sprintEvent:FireServer(true)
+    elseif inputState == Enum.UserInputState.End and sprinting then
+        sprinting = false
+        sprintEvent:FireServer(false)
+    end
+    return Enum.ContextActionResult.Sink
+end
+ContextActionService:BindAction("SprintAction", sprintAction, true, Enum.KeyCode.LeftShift)
+ContextActionService:SetTitle("SprintAction", "ركض")
+ContextActionService:SetPosition("SprintAction", UDim2.new(0.65, 0, 0.82, 0))
+
+-- Standard Roblox thumbstick / keyboard movement remains enabled.
+]]></ProtectedString></Properties></Item>
+      </Item>
+    </Item>
+    <Item class="Lighting" referent="RBX7"><Properties><string name="Name">Lighting</string></Properties></Item>
+    <Item class="SoundService" referent="RBX8"><Properties><string name="Name">SoundService</string></Properties></Item>
+  </Item>
+</roblox>
